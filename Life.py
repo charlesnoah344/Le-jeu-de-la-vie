@@ -1,17 +1,18 @@
 import numpy as np
 import wgpu
 from wgpu import gpu
+import os
+import time
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 # Ouvrir le GPU
 adapter = gpu.request_adapter_sync(power_preference="high-performance")
 device = adapter.request_device_sync()
 
 # Préparer les données
-W, H = 8, 8                                  # largeur, hauteur
-grid = np.zeros((H, W), dtype=np.uint32)     # grille vide, en uint32
-grid[1, 2] = 1                               # un planeur
-grid[2, 3] = 1
-grid[3, 1:4] = 1
+W, H = 200, 150
+grid = (np.random.random((H, W)) < 0.3).astype(np.uint32)
 
 groups_x = (W + 15) // 16    
 groups_y = (H + 15) // 16
@@ -107,32 +108,39 @@ bind_group_b = device.create_bind_group(
     ],
 )
 
-generations = 32
 
-encoder = device.create_command_encoder()
-compute_pass = encoder.begin_compute_pass()
-compute_pass.set_pipeline(pipeline)
+# Préparer la figure et l'image de départ
+fig, ax = plt.subplots()
+im = ax.imshow(grid, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+ax.axis("off")    # pas de graduations autour de l'image
 
-for g in range(generations):
-    if g % 2 == 0:
-        compute_pass.set_bind_group(0, bind_group_a)   # générations paires : 1 -> 2
+
+def update(frame):
+    # frame = 0, 1, 2, 3... : matplotlib l'augmente de 1 à chaque appel.
+    # Ça correspond exactement au nombre de générations déjà calculées.
+
+    # 1. Calculer UNE génération
+    encoder = device.create_command_encoder()
+    compute_pass = encoder.begin_compute_pass()
+    compute_pass.set_pipeline(pipeline)
+    if frame % 2 == 0:
+        compute_pass.set_bind_group(0, bind_group_a)   # lit buffer1, écrit buffer2
+        final_buffer = buffer2
     else:
-        compute_pass.set_bind_group(0, bind_group_b)   # générations impaires : 2 -> 1
+        compute_pass.set_bind_group(0, bind_group_b)   # lit buffer2, écrit buffer1
+        final_buffer = buffer1
     compute_pass.dispatch_workgroups(groups_x, groups_y, 1)
+    compute_pass.end()
+    device.queue.submit([encoder.finish()])
 
-compute_pass.end()
-device.queue.submit([encoder.finish()])
+    # 2. Relire le résultat
+    result = np.frombuffer(device.queue.read_buffer(final_buffer), dtype=np.uint32).reshape(H, W)
 
-result = np.frombuffer(device.queue.read_buffer(buffer2), dtype=np.uint32)
+    # 3. Mettre à jour l'image
+    im.set_data(result)
+    ax.set_title(f"Génération {frame + 1}")
+    return [im]
 
 
-if generations % 2 == 0:
-    final_buffer = buffer1    # nombre pair : on a fini par écrire dans buffer1
-else:
-    final_buffer = buffer2    # nombre impair : on a fini par écrire dans buffer2
-
-result = np.frombuffer(device.queue.read_buffer(final_buffer), dtype=np.uint32)
-
-print(grid)
-print("\n")
-print(result.reshape(H, W))
+ani = FuncAnimation(fig, update, interval=1000, cache_frame_data=False)
+plt.show()
